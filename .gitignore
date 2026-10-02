@@ -6,3 +6,4 @@ __pycache__/
 data/ratings_raw.csv
 data/prices.csv
 data/meta.json
+data/portfolio.txt

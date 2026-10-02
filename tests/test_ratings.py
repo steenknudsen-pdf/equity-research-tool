@@ -95,43 +95,123 @@ def test_consensus():
     assert cons.index[0] in {"AAPL", "MSFT"}
 
 
-@pytest.fixture(autouse=True)
-def clear_streamlit_cache():
+def test_parse_tickers():
+    assert data.parse_tickers("aapl, MSFT\n$nvda;brk.b  AAPL 123 ") == ["AAPL", "MSFT", "NVDA", "BRK.B"]
+
+
+def test_tickers_from_csv():
+    frame = pd.DataFrame({"Account": ["x", "y"], "Symbol": ["aapl", "msft"], "Qty": [1, 2]})
+    assert data.tickers_from_csv(frame) == ["AAPL", "MSFT"]
+    assert data.tickers_from_csv(pd.DataFrame({"anything": ["XOM"]})) == ["XOM"]
+
+
+@pytest.mark.parametrize("counts,label", [
+    ((0, 0, 0), "Not covered"), ((3, 1, 0), "Bullish"), ((1, 1, 1), "Mixed"), ((0, 1, 2), "Bearish"),
+])
+def test_consensus_label(counts, label):
+    assert data.consensus_label(*counts) == label
+
+
+def test_portfolio_view():
+    df = data.enrich(sample_raw(), UNIVERSE, PRICES)
+    view = data.portfolio_view(data.current_ratings(df), data.cuts(df), ["XOM", "AAPL", "TSLA"],
+                               UNIVERSE, PRICES).set_index("ticker")
+    assert view.loc["XOM", "jpm_grade"] == "Underweight"
+    assert view.loc["XOM", "ms_grade"] == "Equal-Weight"
+    assert view.loc["XOM", "covering"] == 2 and view.loc["XOM", "consensus"] == "Bearish"
+    assert view.loc["XOM", "avg_pt"] == pytest.approx(100)
+    assert view.loc["AAPL", "consensus"] == "Bullish"
+    assert view.loc["AAPL", "upside"] == pytest.approx(0.30)
+    assert view.loc["TSLA", "consensus"] == "Not covered"
+    out = data.portfolio_export(view.reset_index())
+    assert "J.P. Morgan" in out.columns and len(out) == 3
+
+
+@pytest.fixture
+def app_data(tmp_path, monkeypatch):
     import streamlit as st
 
     st.cache_data.clear()
-
-
-def test_app_renders(tmp_path, monkeypatch):
-    from streamlit.testing.v1 import AppTest
-
     sample_raw().to_csv(tmp_path / "ratings_raw.csv", index=False)
     PRICES.to_csv(tmp_path / "prices.csv", index=False)
     (tmp_path / "meta.json").write_text(json.dumps(
         {"fetched_at": "2026-01-15T12:00:00+00:00", "tickers_scanned": 3, "tickers_failed": [],
          "rating_actions": 6, "prices": True}))
+    (tmp_path / "portfolio.txt").write_text("AAPL, XOM")
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
     monkeypatch.setattr(config, "RAW_CSV", tmp_path / "ratings_raw.csv")
     monkeypatch.setattr(config, "PRICES_CSV", tmp_path / "prices.csv")
     monkeypatch.setattr(config, "META_JSON", tmp_path / "meta.json")
+    monkeypatch.setattr(config, "PORTFOLIO_TXT", tmp_path / "portfolio.txt")
     monkeypatch.setattr(fetch, "load_universe", lambda: UNIVERSE)
+    return tmp_path
 
-    at = AppTest.from_file(str(config.ROOT / "app.py"), default_timeout=30).run()
-    assert not at.exception
-    assert at.title[0].value == "J.P. Morgan"
-    subheaders = [s.value for s in at.subheader]
-    assert subheaders[0].startswith("🟢 Buy / Overweight (2)")
-    assert any(s.startswith("✂️ Cutting") and "(2)" in s for s in subheaders)
 
-    at.sidebar.radio[0].set_value("All institutions").run()
+def page_html(at) -> str:
+    return "\n".join(m.value for m in at.markdown)
+
+
+def run_page(page: str):
+    """Run the full app (default page) or a single page function by name."""
+    from streamlit.testing.v1 import AppTest
+
+    if not page:
+        return AppTest.from_file(str(config.ROOT / "app.py"), default_timeout=30).run()
+    script = f"from ratings import pages, ui\nui.inject_css()\npages.{page}()\n"
+    return AppTest.from_string(script, default_timeout=30).run()
+
+
+def test_bank_page(app_data):
+    at = run_page("")
     assert not at.exception
-    assert at.title[0].value == "All institutions"
+    html = page_html(at)
+    assert "<h1>J.P. Morgan</h1>" in html
+    assert [t.label for t in at.tabs] == ["Buy (2)", "Neutral (0)", "Sell (1)", "Cutting (2)"]
+    assert "AAPL" in html and "Overweight" in html
+
+
+def test_overview_page(app_data):
+    at = run_page("overview_page")
+    assert not at.exception
+    assert "<h1>Overview</h1>" in page_html(at)
+
+
+def test_portfolio_page(app_data):
+    at = run_page("portfolio_page")
+    assert not at.exception
+    html = page_html(at)
+    assert "How your holdings stack up" in html
+    assert "Bearish" in html and "Bullish" in html  # XOM and AAPL
 
 
 def test_app_empty_state(tmp_path, monkeypatch):
-    from streamlit.testing.v1 import AppTest
+    import streamlit as st
 
+    st.cache_data.clear()
     monkeypatch.setattr(config, "RAW_CSV", tmp_path / "missing.csv")
     monkeypatch.setattr(config, "META_JSON", tmp_path / "missing.json")
-    at = AppTest.from_file(str(config.ROOT / "app.py"), default_timeout=30).run()
+    at = run_page("")
     assert not at.exception
     assert "No data yet" in at.info[0].value
+
+
+def test_fetch_symbols_merges(app_data, monkeypatch):
+    extra = app_data / "extra.txt"
+    monkeypatch.setattr(config, "EXTRA_TICKERS", extra)
+
+    def fake_fetch(symbol):
+        if symbol == "BAD":
+            raise ConnectionError("nope")
+        df = pd.DataFrame([(symbol, pd.Timestamp("2026-02-01"), "UBS", "Buy", "", "init", "Announces", 50, None)],
+                          columns=fetch.RAW_COLUMNS)
+        return df
+
+    monkeypatch.setattr(fetch, "fetch_ticker", fake_fetch)
+    monkeypatch.setattr(fetch, "fetch_prices", lambda syms: pd.DataFrame({"ticker": ["ARM"], "price": [40.0]}))
+    res = fetch.fetch_symbols(["ARM", "BAD"])
+    assert res == {"fetched": ["ARM"], "failed": ["BAD"]}
+    raw = data.load_raw()
+    assert set(raw["ticker"]) == {"AAPL", "MSFT", "XOM", "ARM"}  # old rows kept, new merged
+    assert "ARM" in extra.read_text() and "BAD" not in extra.read_text()
+    prices = pd.read_csv(config.PRICES_CSV).set_index("ticker")["price"]
+    assert prices["ARM"] == 40.0 and prices["AAPL"] == 200.0

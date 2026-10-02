@@ -91,12 +91,11 @@ def fetch_prices(symbols: list[str]) -> pd.DataFrame:
     return pd.DataFrame({"ticker": [back.get(s, s) for s in last.index], "price": last.values}).dropna()
 
 
-def fetch_all(
+def _scan(
+    symbols: list[str],
     progress: Callable[[int, int, str], None] | None = None,
     workers: int = 8,
-) -> dict:
-    """Fetch ratings for the whole universe and write data/ files. Returns metadata."""
-    symbols = load_universe()["Symbol"].tolist()
+) -> tuple[pd.DataFrame, list[str]]:
     frames, failed = [], []
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = {pool.submit(fetch_ticker, s): s for s in symbols}
@@ -108,16 +107,36 @@ def fetch_all(
                 failed.append(sym)
             if progress:
                 progress(done, len(symbols), sym)
-
     frames = [f for f in frames if not f.empty]
     raw = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=RAW_COLUMNS)
-    if len(failed) == len(symbols):
+    if symbols and len(failed) == len(symbols):
         raise RuntimeError(
             "Every Yahoo Finance request failed - check your internet connection. "
             "Existing data was left untouched."
         )
-    config.DATA_DIR.mkdir(exist_ok=True)
+    return raw, failed
+
+
+def _write_raw(raw: pd.DataFrame) -> None:
+    config.DATA_DIR.mkdir(parents=True, exist_ok=True)
     raw.sort_values(["date", "ticker"], ascending=[False, True]).to_csv(config.RAW_CSV, index=False)
+
+
+def _write_meta(**updates) -> dict:
+    meta = json.loads(config.META_JSON.read_text()) if config.META_JSON.exists() else {}
+    meta.update(updates)
+    config.META_JSON.write_text(json.dumps(meta, indent=2))
+    return meta
+
+
+def fetch_all(
+    progress: Callable[[int, int, str], None] | None = None,
+    workers: int = 8,
+) -> dict:
+    """Fetch ratings for the whole universe and write data/ files. Returns metadata."""
+    symbols = load_universe()["Symbol"].tolist()
+    raw, failed = _scan(symbols, progress, workers)
+    _write_raw(raw)
 
     try:
         fetch_prices(symbols).to_csv(config.PRICES_CSV, index=False)
@@ -125,15 +144,59 @@ def fetch_all(
     except Exception:
         prices_ok = False
 
-    meta = {
-        "fetched_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        "tickers_scanned": len(symbols),
-        "tickers_failed": failed,
-        "rating_actions": int(len(raw)),
-        "prices": prices_ok,
-    }
-    config.META_JSON.write_text(json.dumps(meta, indent=2))
-    return meta
+    return _write_meta(
+        fetched_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        tickers_scanned=len(symbols),
+        tickers_failed=failed,
+        rating_actions=int(len(raw)),
+        prices=prices_ok,
+    )
+
+
+def add_extra_tickers(symbols: list[str]) -> None:
+    """Remember tickers outside the S&P 500 so every future refresh includes them."""
+    known = set(load_universe()["Symbol"])
+    new = [s for s in symbols if s not in known]
+    if not new:
+        return
+    existing = config.EXTRA_TICKERS.read_text() if config.EXTRA_TICKERS.exists() else ""
+    if existing and not existing.endswith("\n"):
+        existing += "\n"
+    config.EXTRA_TICKERS.write_text(existing + "\n".join(new) + "\n")
+
+
+def fetch_symbols(
+    symbols: list[str],
+    progress: Callable[[int, int, str], None] | None = None,
+) -> dict:
+    """Fetch (or re-fetch) just these tickers and merge them into the saved data."""
+    symbols = list(dict.fromkeys(symbols))
+    raw, failed = _scan(symbols, progress)
+    if config.RAW_CSV.exists():
+        old = pd.read_csv(config.RAW_CSV, parse_dates=["date"])
+        old = old[~old["ticker"].isin(set(symbols) - set(failed))]
+        raw = pd.concat([old, raw], ignore_index=True)
+    _write_raw(raw)
+    add_extra_tickers([s for s in symbols if s not in failed])
+
+    try:
+        new_prices = fetch_prices(symbols)
+        if config.PRICES_CSV.exists():
+            old_prices = pd.read_csv(config.PRICES_CSV)
+            new_prices = pd.concat(
+                [old_prices[~old_prices["ticker"].isin(new_prices["ticker"])], new_prices],
+                ignore_index=True,
+            )
+        new_prices.to_csv(config.PRICES_CSV, index=False)
+    except Exception:
+        pass
+
+    meta = {"rating_actions": int(len(raw))}
+    if not config.META_JSON.exists():
+        meta.update(fetched_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                    tickers_scanned=len(symbols), tickers_failed=failed, prices=True)
+    _write_meta(**meta)
+    return {"fetched": [s for s in symbols if s not in failed], "failed": failed}
 
 
 def _cli_progress(done: int, total: int, sym: str) -> None:

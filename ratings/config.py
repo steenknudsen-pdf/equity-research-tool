@@ -13,6 +13,7 @@ EXTRA_TICKERS = ROOT / "data" / "extra_tickers.txt"
 RAW_CSV = DATA_DIR / "ratings_raw.csv"
 PRICES_CSV = DATA_DIR / "prices.csv"
 META_JSON = DATA_DIR / "meta.json"
+PORTFOLIO_TXT = DATA_DIR / "portfolio.txt"
 
 # Only ratings issued on/after this date count as "current".
 START_DATE = "2025-01-01"
@@ -22,6 +23,7 @@ START_DATE = "2025-01-01"
 class Institution:
     key: str
     name: str
+    short: str
     extel_rank: int
     # Prefixes matched against the firm name with all non-alphanumerics
     # removed and lower-cased (e.g. "J.P. Morgan" -> "jpmorgan").
@@ -36,16 +38,16 @@ class Institution:
 # leaders table, top 10 by published positions. BofA and Morgan Stanley tied
 # for 2nd. Order here is the order shown in the dashboard.
 INSTITUTIONS: tuple[Institution, ...] = (
-    Institution("jpm", "J.P. Morgan", 1, ("jpmorgan", "jpm")),
-    Institution("ms", "Morgan Stanley", 2, ("morganstanley",)),
-    Institution("bofa", "BofA Securities", 2, ("bofa", "bankofamerica", "merrilllynch")),
-    Institution("evercore", "Evercore ISI", 4, ("evercore",)),
-    Institution("jefferies", "Jefferies", 5, ("jefferies",)),
-    Institution("ubs", "UBS", 6, ("ubs",)),
-    Institution("wolfe", "Wolfe Research", 7, ("wolfe",)),
-    Institution("wells", "Wells Fargo Securities", 8, ("wellsfargo",)),
-    Institution("barclays", "Barclays", 9, ("barclays",)),
-    Institution("bernstein", "Bernstein", 10, ("bernstein", "sanfordcbernstein", "societegeneralebernstein")),
+    Institution("jpm", "J.P. Morgan", "JPM", 1, ("jpmorgan", "jpm")),
+    Institution("ms", "Morgan Stanley", "MS", 2, ("morganstanley",)),
+    Institution("bofa", "BofA Securities", "BofA", 2, ("bofa", "bankofamerica", "merrilllynch")),
+    Institution("evercore", "Evercore ISI", "EVR", 4, ("evercore",)),
+    Institution("jefferies", "Jefferies", "JEF", 5, ("jefferies",)),
+    Institution("ubs", "UBS", "UBS", 6, ("ubs",)),
+    Institution("wolfe", "Wolfe Research", "Wolfe", 7, ("wolfe",)),
+    Institution("wells", "Wells Fargo Securities", "WFS", 8, ("wellsfargo",)),
+    Institution("barclays", "Barclays", "BARC", 9, ("barclays",)),
+    Institution("bernstein", "Bernstein", "BERN", 10, ("bernstein", "sanfordcbernstein", "societegeneralebernstein")),
 )
 INSTITUTIONS_BY_KEY = {i.key: i for i in INSTITUTIONS}
 
