@@ -1,0 +1,1 @@
+# Extra tickers to scan beyond the S&P 500, one per line (e.g. ARM, TSM, ASML).
